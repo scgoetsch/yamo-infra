@@ -16,3 +16,9 @@ scrape_configs:
         regex: "(.+):\\d+"
         target_label: node
         replacement: "${1}"
+
+  - job_name: yamo-daemon
+    static_configs:
+      - targets: ["daemon:18790"]
+    metrics_path: /metrics
+    scrape_interval: 15s

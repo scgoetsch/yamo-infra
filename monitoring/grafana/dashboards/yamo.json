@@ -463,7 +463,7 @@
         "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom" },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "title": "MemoryMesh Entries (yamo-gateway authoritative)",
+      "title": "MemoryMesh Entries (yamo-daemon authoritative)",
       "type": "timeseries",
       "targets": [
         {
