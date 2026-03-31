@@ -1,0 +1,104 @@
+# YAMO Bridge — 3-node Raft cluster overlay
+#
+# Extends docker-compose.yml with two additional bridge replicas.
+# All three nodes form a single Raft consensus group.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cluster.yml up
+#
+# How it works:
+#   1. bridge1/bridge2/bridge3 share RELEASE_COOKIE and know each other's
+#      RELEASE_NODE name. libcluster (Cluster.Strategy.Epmd) auto-connects
+#      the Erlang nodes once they can reach each other on the Docker network.
+#   2. YAMO_BRIDGE_RAFT_NODES lists all three node names so ClusterSupervisor
+#      uses bootstrap_multi/1 instead of bootstrap_single/0.
+#   3. The first node alphabetically triggers the Raft election.
+#
+# Node naming convention: yamo@<hostname>
+#   bridge  → yamo@bridge1 (port 4001) — overrides base service
+#   bridge2 → yamo@bridge2 (port 4002)
+#   bridge3 → yamo@bridge3 (port 4003)
+#
+# Env vars:
+#   RELEASE_COOKIE   — shared Erlang cookie (default: yamo-cluster-secret-changeme)
+#   GRAFANA_PASSWORD — Grafana admin password (default: admin)
+
+x-bridge-env: &bridge-env
+  SECRET_KEY_BASE: "${SECRET_KEY_BASE:-insecure-dev-secret-change-in-production-aaaaaaaaaaaaaaaaaaaaaaaa}"
+  YAMO_BRIDGE_AUTH_ENABLED: "${YAMO_BRIDGE_AUTH_ENABLED:-false}"
+  YAMO_RA_DATA_DIR: /data/ra
+  RELEASE_DISTRIBUTION: "name"
+  RELEASE_COOKIE: "${RELEASE_COOKIE:-yamo-cluster-secret-changeme}"
+  YAMO_BRIDGE_RAFT_NODES: "yamo@bridge1,yamo@bridge2,yamo@bridge3"
+
+x-bridge-healthcheck: &bridge-healthcheck
+  test: ["CMD", "bin/yamo_bridge", "rpc", "Application.started_applications() |> Enum.any?(fn {app,_,_} -> app == :yamo_bridge end)"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+services:
+  # Override the base bridge service — give it a node name and cluster config
+  bridge:
+    hostname: bridge1
+    environment:
+      <<: *bridge-env
+      PORT: "4001"
+      RELEASE_NODE: "yamo@bridge1"
+    healthcheck: *bridge-healthcheck
+
+  bridge2:
+    build:
+      context: ../yamo-bridge
+      dockerfile: Dockerfile
+    image: yamo-bridge:local
+    hostname: bridge2
+    ports:
+      - "4002:4002"
+    environment:
+      <<: *bridge-env
+      PORT: "4002"
+      RELEASE_NODE: "yamo@bridge2"
+    volumes:
+      - bridge2_ra_data:/data/ra
+    healthcheck: *bridge-healthcheck
+    depends_on:
+      bridge:
+        condition: service_healthy
+
+  bridge3:
+    build:
+      context: ../yamo-bridge
+      dockerfile: Dockerfile
+    image: yamo-bridge:local
+    hostname: bridge3
+    ports:
+      - "4003:4003"
+    environment:
+      <<: *bridge-env
+      PORT: "4003"
+      RELEASE_NODE: "yamo@bridge3"
+    volumes:
+      - bridge3_ra_data:/data/ra
+    healthcheck: *bridge-healthcheck
+    depends_on:
+      bridge2:
+        condition: service_healthy
+
+  # Kernel connects to the primary bridge node
+  kernel:
+    environment:
+      YAMO_BRIDGE_URL: "ws://bridge1:4001/socket/websocket"
+    depends_on:
+      bridge:
+        condition: service_healthy
+
+  # Prometheus scrapes all three bridge nodes
+  prometheus:
+    volumes:
+      - ./monitoring/prometheus.cluster.yml:/etc/prometheus/prometheus.yml:ro
+
+volumes:
+  bridge2_ra_data:
+  bridge3_ra_data:

@@ -1,0 +1,121 @@
+# YAMO Stack — bridge + daemon + observability
+#
+# Usage:
+#   cp .env.example .env        # fill in LLM keys + YAMO_BRIDGE_SECRET_KEY_BASE
+#   docker compose up           # starts all services
+#   docker compose up bridge daemon  # bridge + daemon only (no observability)
+#
+# Required env vars (in .env):
+#   ZAI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY  — at least one LLM key
+#   YAMO_BRIDGE_SECRET_KEY_BASE                        — 64-char random string (openssl rand -hex 64)
+#
+# Optional env vars:
+#   YAMO_BRIDGE_AUTH_ENABLED   — "true" to enable Ed25519 device auth (default: false)
+#   YAMO_SRE_ENABLED           — "true" to enable autonomous SRE alert agent (default: false)
+#   YAMO_SRE_SLACK_WEBHOOK_URL — Slack webhook for SRE alerts
+#   YAMO_PD_API_KEY            — PagerDuty API key for SRE notes
+#   LOG_LEVEL                  — quiet | info | verbose | debug (default: info)
+#
+# Ports:
+#   4001  — yamo-bridge HTTP + WebSocket
+#   18790 — yamo-os daemon API
+#   9090  — Prometheus
+#   3000  — Grafana (admin / admin)
+
+services:
+  bridge:
+    build:
+      context: ../yamo-bridge
+      dockerfile: Dockerfile
+    image: yamo-bridge:local
+    ports:
+      - "4001:4001"
+    environment:
+      PORT: "4001"
+      SECRET_KEY_BASE: "${YAMO_BRIDGE_SECRET_KEY_BASE:?Set YAMO_BRIDGE_SECRET_KEY_BASE (openssl rand -hex 64)}"
+      YAMO_BRIDGE_AUTH_ENABLED: "${YAMO_BRIDGE_AUTH_ENABLED:-false}"
+      YAMO_RA_DATA_DIR: /data/ra
+    volumes:
+      - bridge_ra_data:/data/ra
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  daemon:
+    build:
+      context: ../yamo-os
+      dockerfile: Dockerfile
+    image: yamo-os:local
+    ports:
+      - "18790:18790"
+    environment:
+      NODE_ENV: production
+      API_PORT: "18790"
+      YAMO_BRIDGE_URL: "ws://bridge:4001/socket/websocket"
+      YAMO_BRIDGE_AUTH_ENABLED: "${YAMO_BRIDGE_AUTH_ENABLED:-false}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      YAMO_SRE_ENABLED: "${YAMO_SRE_ENABLED:-false}"
+      YAMO_SLACK_WEBHOOK_URL: "${YAMO_SLACK_WEBHOOK_URL:-}"
+      YAMO_PD_API_KEY: "${YAMO_PD_API_KEY:-}"
+      YAMO_INBOX_DIR: "${YAMO_INBOX_DIR:-}"
+      # LLM provider — set at least one key
+      ZAI_API_KEY: "${ZAI_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-zai}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      EMBEDDING_MODEL_TYPE: "${EMBEDDING_MODEL_TYPE:-local}"
+      EMBEDDING_MODEL_NAME: "${EMBEDDING_MODEL_NAME:-Xenova/all-MiniLM-L6-v2}"
+      EMBEDDING_DIMENSION: "${EMBEDDING_DIMENSION:-384}"
+    volumes:
+      - daemon_lancedb:/app/runtime/data
+    depends_on:
+      bridge:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18790/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      bridge:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  bridge_ra_data:
+  daemon_lancedb:
+  prometheus_data:
+  grafana_data:
